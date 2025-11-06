@@ -1,0 +1,694 @@
+import React, { useEffect, useMemo, useState } from "react";
+import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
+import { toast } from "sonner";
+import { Download, PlusCircle, Undo2, Package, Users, Activity, Filter, ClipboardList, Trophy, Target } from "lucide-react";
+import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as ChartTooltip } from "recharts";
+
+// -------------------- Utils --------------------
+const uuid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+const todayISO = () => new Date().toISOString();
+const toDateOnly = (d) => new Date(d).toISOString().slice(0,10);
+const fmtCurrency = (n) => new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', minimumFractionDigits: 0 }).format(Number(n||0));
+
+// Default season: current year summer (Jun 1 → Aug 31)
+const y = new Date().getFullYear();
+const DEFAULT_SEASON = { start: `${y}-06-01`, end: `${y}-08-31` };
+const FISCAL_START = `${y}-01-01`;
+
+// Standardized loss reasons
+const LOSS_REASONS = ["Stolen","Damaged","Misplaced","Expired/Obsolete","Installer Error","Other"];
+
+// Brand color (Vivint dark)
+const BRAND = "#282a3b";
+
+// -------------------- Local Storage --------------------
+const LS_KEYS = {
+  items: "inv_items_v2",
+  employees: "inv_employees_v2",
+  txns: "inv_txns_v2",
+  season: "inv_season_v2",
+};
+const lsGet = (k, f) => { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : f; } catch { return f; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+
+// -------------------- Seed Data --------------------
+const seedItems = [
+  { id: uuid(), name: "Door Sensor", sku: "DS-100", unit: "pcs", initialQty: 120, currentQty: 120, minQty: 30, unitCost: 20 },
+  { id: uuid(), name: "Outdoor Camera Pro", sku: "OCP-2", unit: "pcs", initialQty: 40, currentQty: 40, minQty: 10, unitCost: 199 },
+  { id: uuid(), name: "Smart Lock", sku: "SL-200", unit: "pcs", initialQty: 75, currentQty: 75, minQty: 15, unitCost: 150 },
+  { id: uuid(), name: "Thermostat", sku: "TH-3", unit: "pcs", initialQty: 60, currentQty: 60, minQty: 12, unitCost: 180 },
+];
+const seedEmployees = [
+  { id: uuid(), name: "Jordan Kim",   role: "Installer", empType: "Full-time", team: "Alpha", region: "East" },
+  { id: uuid(), name: "Taylor Brooks",role: "Installer", empType: "Full-time", team: "Alpha", region: "West" },
+  { id: uuid(), name: "Riley Gomez",  role: "Installer", empType: "Full-time", team: "Alpha", region: "South" },
+  { id: uuid(), name: "Casey Morgan", role: "Installer", empType: "Full-time", team: "Alpha", region: "North" },
+  { id: uuid(), name: "Avery Chen",   role: "Installer", empType: "Full-time", team: "Alpha", region: "West" },
+  { id: uuid(), name: "Peyton Diaz",  role: "Installer", empType: "Summer",    team: "Bravo", region: "East" },
+  { id: uuid(), name: "Quinn Patel",  role: "Installer", empType: "Summer",    team: "Bravo", region: "West" },
+  { id: uuid(), name: "Drew Allen",   role: "Installer", empType: "Summer",    team: "Bravo", region: "South" },
+  { id: uuid(), name: "Skylar Nguyen",role: "Installer", empType: "Summer",    team: "Bravo", region: "North" },
+  { id: uuid(), name: "Emerson Lee",  role: "Installer", empType: "Summer",    team: "Bravo", region: "East" },
+];
+const seedTxns = [];
+
+// Demo mode: synthesize leaderboard/incentives metrics without logging transactions
+const DEMO_MODE = true;
+
+// -------------------- CSV Export --------------------
+function toCSV(rows) {
+  const headers = Object.keys(rows[0] || {});
+  if (headers.length === 0) return "";
+  const escape = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const body = rows.map(r => headers.map(h => escape(r[h])).join(",")).join("\n");
+  return [headers.join(","), body].filter(Boolean).join("\n");
+}
+
+// -------------------- Main App --------------------
+export default function InventoryUsageTracker() {
+  const [items, setItems] = useState(() => lsGet(LS_KEYS.items, seedItems));
+  const [employees, setEmployees] = useState(() => lsGet(LS_KEYS.employees, seedEmployees));
+  const [txns, setTxns] = useState(() => lsGet(LS_KEYS.txns, seedTxns));
+  const [season, setSeason] = useState(() => lsGet(LS_KEYS.season, DEFAULT_SEASON));
+
+  const [search, setSearch] = useState("");
+  const [onlyLow, setOnlyLow] = useState(false);
+
+  useEffect(() => { lsSet(LS_KEYS.items, items); }, [items]);
+  useEffect(() => { lsSet(LS_KEYS.employees, employees); }, [employees]);
+  useEffect(() => { lsSet(LS_KEYS.txns, txns); }, [txns]);
+  useEffect(() => { lsSet(LS_KEYS.season, season); }, [season]);
+
+  // Ensure 10 demo installers if localStorage has fewer (only in DEMO_MODE)
+  useEffect(() => {
+    if (DEMO_MODE && employees.length < 10) {
+      setEmployees(seedEmployees);
+    }
+  }, [employees]);
+
+  // -------------------- Filters & KPIs --------------------
+  const filteredItems = useMemo(() => {
+    const q = search.toLowerCase().trim();
+    let res = items.filter(i => i.name.toLowerCase().includes(q) || i.sku.toLowerCase().includes(q));
+    if (onlyLow) res = res.filter(i => i.currentQty <= i.minQty);
+    return res;
+  }, [items, search, onlyLow]);
+
+  const totals = useMemo(() => {
+    const totalSkus = items.length;
+    const totalUnits = items.reduce((s,i)=>s+(Number(i.currentQty)||0),0);
+    const lowStock = items.filter(i => i.currentQty <= i.minQty).length;
+    const last7d = txns.filter(t => Date.now() - new Date(t.timestamp).getTime() < 7*24*3600*1000).length;
+    return { totalSkus, totalUnits, lowStock, last7d };
+  }, [items, txns]);
+
+  // -------------------- Series (last 30d usage) --------------------
+  const usageSeries = useMemo(() => {
+    const map = new Map();
+    const start = new Date(); start.setDate(start.getDate()-29); start.setHours(0,0,0,0);
+    for (let d = new Date(start); d <= new Date(); d.setDate(d.getDate()+1)) map.set(toDateOnly(d), 0);
+    txns.forEach(t => {
+      if ((t.type === 'issue' && t.activity === 'Install') || t.type === 'adjust-') {
+        const day = toDateOnly(t.timestamp);
+        if (map.has(day)) map.set(day, map.get(day)+Number(t.qty||0));
+      }
+    });
+    return Array.from(map.entries()).map(([date, qty]) => ({ date, qty }));
+  }, [txns]);
+
+  // -------------------- Helpers for metrics --------------------
+  const inRange = (ts, a, b) => {
+    const x = new Date(ts).getTime();
+    return x >= new Date(a).getTime() && x <= new Date(b).getTime();
+  };
+
+  function calcTeamMetrics(team, start, end) {
+    const teamMembers = employees.filter(e => e.team === team);
+    const ids = new Set(teamMembers.map(e=>e.id));
+    const rows = txns.filter(t => ids.has(t.employeeId) && inRange(t.timestamp, start, end));
+    const installs = rows.filter(t => t.type==='issue' && t.activity==='Install').reduce((s,t)=>s+t.qty,0);
+    const losses = rows.filter(t => t.type==='loss').reduce((s,t)=>s+t.qty,0);
+    const returns = rows.filter(t => t.type==='return').reduce((s,t)=>s+t.qty,0);
+    const issues = rows.filter(t => t.type==='issue').reduce((s,t)=>s+t.qty,0);
+    const lossRate = issues ? (losses / issues) : 0;
+    return { installs, losses, returns, issues, lossRate };
+  }
+
+  function monthSpan(offset=0) {
+    const d = new Date();
+    d.setMonth(d.getMonth()+offset, 1); d.setHours(0,0,0,0);
+    const start = toDateOnly(d);
+    const e = new Date(d); e.setMonth(e.getMonth()+1); e.setDate(0); e.setHours(23,59,59,999);
+    const end = toDateOnly(e);
+    return { start, end };
+  }
+
+  // Leaderboard for Installers (season window)
+  const installerLeaderboard = useMemo(() => {
+    const installers = employees.filter(e => e.role.toLowerCase()==='installer');
+
+    if (DEMO_MODE) {
+      const randInt = (min, max) => Math.floor(Math.random()*(max-min+1))+min;
+      const pick = (arr) => arr[Math.floor(Math.random()*arr.length)];
+      const reasonsSample = LOSS_REASONS.filter(r=>r!=="Other");
+      const perEmp = installers.map(emp => {
+        const installs = randInt(35, 120);
+        const losses = randInt(0, Math.max(0, Math.floor(installs*0.2)));
+        const issues = installs; // treat installs as issues for demo
+        const lossRate = issues ? (losses / issues) : 0;
+        const score = randInt(1,10);
+        const progressPercent = randInt(35, 100); // towards incentive target
+        const avgUnitCost = randInt(40, 250);
+        const lossReason = reasonsSample.length ? pick(reasonsSample) : 'Damaged';
+        const lossValue = losses * avgUnitCost;
+        return { emp, installs, losses, returns: 0, issues, lossRate, score, progressPercent, lossReason, lossValue };
+      }).sort((a,b)=> b.score - a.score || b.installs - a.installs);
+
+      const byRegion = new Map();
+      perEmp.forEach(r => {
+        const key = r.emp.region || 'Unknown';
+        if (!byRegion.has(key)) byRegion.set(key, { region:key, installs:0, losses:0, lossValue:0, issues:0, score:0 });
+        const agg = byRegion.get(key);
+        agg.installs += r.installs; agg.losses += r.losses; agg.lossValue += r.lossValue; agg.issues += r.issues; agg.score += r.score;
+      });
+      const regions = Array.from(byRegion.values()).map(r => ({...r, lossRate: r.issues ? r.losses / r.issues : 0})).sort((a,b)=>b.score-a.score);
+      return { perEmp, regions };
+    }
+
+    // Non-demo (derive from txns/season)
+    const start = season.start; const end = season.end;
+    const perEmp = installers.map(emp => {
+      const rows = txns.filter(t => t.employeeId===emp.id && inRange(t.timestamp, start, end));
+      const installs = rows.filter(t => t.type==='issue' && t.activity==='Install').reduce((s,t)=>s+t.qty,0);
+      const lossRows = rows.filter(t => t.type==='loss');
+      const losses = lossRows.reduce((s,t)=>s+t.qty,0);
+      const returns = rows.filter(t => t.type==='return').reduce((s,t)=>s+t.qty,0);
+      const issues = rows.filter(t => t.type==='issue').reduce((s,t)=>s+t.qty,0);
+      const lossRate = issues ? (losses / issues) : 0;
+      const score = installs - losses;
+      const progressPercent = Math.min(100, Math.round((score/100)*100));
+      const lossValue = lossRows.reduce((s,t)=> s + Number(t.lossValue||0), 0);
+      // find most common loss reason
+      const reasonMap = new Map();
+      lossRows.forEach(t=>{ const k=t.lossReason||'-'; reasonMap.set(k,(reasonMap.get(k)||0)+t.qty); });
+      const lossReason = Array.from(reasonMap.entries()).sort((a,b)=>b[1]-a[1])[0]?.[0] || '-';
+      return { emp, installs, losses, returns, issues, lossRate, score, progressPercent, lossReason, lossValue };
+    }).sort((a,b)=> b.score - a.score || b.installs - a.installs);
+
+    const byRegion = new Map();
+    perEmp.forEach(r => {
+      const key = r.emp.region || 'Unknown';
+      if (!byRegion.has(key)) byRegion.set(key, { region:key, installs:0, losses:0, lossValue:0, issues:0, score:0 });
+      const agg = byRegion.get(key);
+      agg.installs += r.installs; agg.losses += r.losses; agg.lossValue += r.lossValue; agg.issues += r.issues; agg.score += r.score;
+    });
+    const regions = Array.from(byRegion.values()).map(r => ({...r, lossRate: r.issues ? r.losses / r.issues : 0})).sort((a,b)=>b.score-a.score);
+
+    return { perEmp, regions };
+  }, [employees, txns, season]);
+
+  // Managers: monthly improvement & $1k eligibility
+  const managerSnapshots = useMemo(() => {
+    const curr = monthSpan(0); const prev = monthSpan(-1);
+    return employees.filter(e => e.role.toLowerCase()==='manager').map(m => {
+      const team = m.team;
+      const now = calcTeamMetrics(team, curr.start, curr.end);
+      const before = calcTeamMetrics(team, prev.start, prev.end);
+      const improvement = (before.lossRate || 0) - (now.lossRate || 0); // positive is good
+      const eligible = improvement > 0 && now.issues >= 10; // arbitrary threshold
+      return { manager: m, team, curr: now, prev: before, improvement, eligible };
+    });
+  }, [employees, txns]);
+
+  // -------------------- Actions --------------------
+  function addItem(newItem) {
+    setItems(prev => [...prev, newItem]);
+    toast.success("Item added");
+  }
+  function addEmployee(newEmp) {
+    setEmployees(prev => [...prev, newEmp]);
+    toast.success("Employee added");
+  }
+  function logTxn({ itemId, employeeId, type, qty, note, activity, lossReason }) {
+    const item = items.find(i => i.id === itemId);
+    const emp = employees.find(e => e.id === employeeId);
+    if (!item || !emp) return toast.error("Select valid item and employee");
+    const q = Number(qty);
+    if (!q || q <= 0) return toast.error("Quantity must be > 0");
+    if (type === 'loss' && !String(lossReason || '').trim()) return toast.error("Loss reason is required for Loss transactions");
+
+    setItems(prev => prev.map(i => {
+      if (i.id !== itemId) return i;
+      const next = { ...i };
+      if (type === 'issue') next.currentQty = Math.max(0, (Number(i.currentQty)||0) - q);
+      if (type === 'return') next.currentQty = (Number(i.currentQty)||0) + q;
+      if (type === 'adjust+') next.currentQty = (Number(i.currentQty)||0) + q;
+      if (type === 'adjust-') next.currentQty = Math.max(0, (Number(i.currentQty)||0) - q);
+      if (type === 'loss') next.currentQty = Math.max(0, (Number(i.currentQty)||0) - q);
+      return next;
+    }));
+
+    setTxns(prev => [{
+      id: uuid(), itemId, employeeId, type, qty: q, activity: activity || "",
+      lossReason: type==='loss' ? (lossReason || '') : '',
+      lossValue: type==='loss' ? (q * Number(item.unitCost||0)) : 0,
+      note: note?.trim() || "",
+      timestamp: todayISO()
+    }, ...prev]);
+
+    toast.success("Transaction saved");
+  }
+
+  function exportInventory() {
+    const rows = items.map(i => ({ id:i.id, name:i.name, sku:i.sku, unit:i.unit, initialQty:i.initialQty, currentQty:i.currentQty, minQty:i.minQty }));
+    const blob = new Blob([toCSV(rows)], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = `inventory_${toDateOnly(new Date())}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  }
+  function exportTxns() {
+    const rows = txns.map(t => ({...t}));
+    const blob = new Blob([toCSV(rows)], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = `transactions_${toDateOnly(new Date())}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function resetDemo() {
+    setEmployees(seedEmployees);
+    setTxns([]);
+    toast.success("Demo data reset: 10 installers loaded");
+  }
+
+  return (
+    <div className="min-h-screen bg-white text-gray-900 p-6 space-y-6">
+      <header className="flex items-center justify-between bg-[#282a3b] text-white rounded-2xl p-4">
+        <div className="flex items-center gap-3">
+          <Package className="w-7 h-7" />
+          <h1 className="text-2xl font-bold">Inventory Usage & Incentives Tracker</h1>
+        </div>
+        <div className=\"flex gap-2\">
+          <Button variant=\"outline\" className=\"border-white text-white hover:bg-white hover:text-[#282a3b]\" onClick={exportInventory}><Download className=\"w-4 h-4 mr-2\"/>Export Inventory</Button>
+          <Button variant=\"outline\" className=\"border-white text-white hover:bg-white hover:text-[#282a3b]\" onClick={exportTxns}><Download className=\"w-4 h-4 mr-2\"/>Export Transactions</Button>
+          <Button className=\"bg-white text-[#282a3b] hover:bg-gray-100\" onClick={resetDemo}>Reset Demo Data</Button>
+        </div>
+      </header>
+
+      {/* KPI Cards */}
+      <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <MetricCard icon={<Package className="w-5 h-5" />} label="Total SKUs" value={totals.totalSkus} />
+        <MetricCard icon={<ClipboardList className="w-5 h-5" />} label="Units In Stock" value={totals.totalUnits} />
+        <MetricCard icon={<Activity className="w-5 h-5" />} label="Txns (7 days)" value={totals.last7d} />
+        <MetricCard icon={<Users className="w-5 h-5" />} label="Low Stock" value={totals.lowStock} highlight />
+      </section>
+
+      <Tabs defaultValue="leaderboard" className="space-y-4">
+        <TabsList className="grid grid-cols-2 w-full border rounded-2xl">
+          <TabsTrigger value="leaderboard" className="data-[state=active]:bg-[#282a3b] data-[state=active]:text-white">Leaderboard</TabsTrigger>
+          <TabsTrigger value="incentives" className="data-[state=active]:bg-[#282a3b] data-[state=active]:text-white">Incentives</TabsTrigger>
+        </TabsList>
+
+        
+
+        
+
+        
+
+        
+
+        {/* Leaderboard Tab */}
+        <TabsContent value="leaderboard" className="space-y-4">
+          <Card>
+            <CardContent className="p-6 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2"><Trophy className="w-5 h-5"/><h3 className="text-lg font-semibold">Installer Leaderboard (Season)</h3></div>
+                <div className="flex items-center gap-2">
+                  <label className="text-sm">Season</label>
+                  <Input type="date" value={season.start} onChange={e=>setSeason(s=>({...s, start:e.target.value}))} />
+                  <span>→</span>
+                  <Input type="date" value={season.end} onChange={e=>setSeason(s=>({...s, end:e.target.value}))} />
+                </div>
+              </div>
+
+              <div className="overflow-x-auto rounded-2xl border">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50 text-left">
+                    <tr>
+                      <th className="p-3">Employee</th>
+                      <th className="p-3">Team</th>
+                      <th className="p-3">Region</th>
+                      <th className="p-3">Installs</th>
+                      <th className="p-3">Losses</th>
+                      <th className="p-3">Loss $</th>
+                      <th className="p-3">Reason</th>
+                      
+                      <th className="p-3">Score</th>
+                      <th className="p-3">Progress</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {installerLeaderboard.perEmp.map(r => (
+                      <tr key={r.emp.id} className="border-t">
+                        <td className="p-3 font-medium">{r.emp.name} {r.emp.empType === 'Summer' && (<Badge>Summer</Badge>)}</td>
+                        <td className="p-3">{r.emp.team}</td>
+                        <td className="p-3">{r.emp.region}</td>
+                        <td className="p-3">{r.installs}</td>
+                        <td className="p-3">{r.losses}</td>
+                        <td className="p-3">{fmtCurrency(r.lossValue)}</td>
+                        <td className="p-3">{r.lossReason || '-'}</td>
+                        
+                        <td className="p-3 font-semibold">{r.score}</td>
+                        <td className="p-3 w-48">
+                          <ProgressBar value={r.progressPercent} />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="mt-6">
+                <h4 className="font-semibold mb-2">Top Regions</h4>
+                <div className="overflow-x-auto rounded-2xl border">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50 text-left"><tr>
+                      <th className="p-3">Region</th><th className="p-3">Installs</th><th className="p-3">Losses</th><th className="p-3">Loss $</th><th className="p-3">Score</th>
+                    </tr></thead>
+                    <tbody>
+                      {installerLeaderboard.regions.map(r => (
+                        <tr key={r.region} className="border-t">
+                          <td className="p-3 font-medium">{r.region}</td>
+                          <td className="p-3">{r.installs}</td>
+                          <td className="p-3">{r.losses}</td>
+                          <td className="p-3">{fmtCurrency(r.lossValue)}</td>
+                          
+                          <td className="p-3 font-semibold">{r.score}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Incentives Tab */}
+        <TabsContent value="incentives" className="space-y-4">
+          <Card>
+            <CardContent className="p-6 space-y-4">
+              <div className="flex items-center gap-2"><Target className="w-5 h-5"/><h3 className="text-lg font-semibold">Programs & Eligibility</h3></div>
+              <div className="grid md:grid-cols-2 gap-4">
+                <div className="rounded-2xl border p-4">
+                  <h4 className="font-semibold mb-1">Installers – Summer Competition</h4>
+                  <ul className="list-disc pl-5 text-sm space-y-1">
+                    <li>Competition for <b>top team/region</b> during season window.</li>
+                    <li>Prize: <b>$3,000</b> at end of summer <i>or</i> Mexico trip.</li>
+                    <li>Company will <b>match amount to charity</b> of winner's choice.</li>
+                  </ul>
+                  <p className="text-xs text-gray-500 mt-2">Scoring = Installs − Losses. Use season dates above to set summer window.</p>
+                </div>
+                <div className=\"rounded-2xl border p-4\">
+                  <h4 className=\"font-semibold mb-1\">Managers – Team Results</h4>
+                  <ul className=\"list-disc pl-5 text-sm space-y-1\">
+                    <li>Focus: reduce <b>losses</b> month-over-month.</li>
+                    <li><b>$1,000</b> monthly incentive for teams that hit targets.</li>
+                    <li>Performance-based raise at end of fiscal year.</li>
+                  </ul>
+                </div>
+              </div>
+
+              </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
+
+function ProgressBar({ value }) {
+  const v = Math.max(0, Math.min(100, Number(value)||0));
+  return (
+    <div className="h-2 w-full rounded-full bg-gray-200 overflow-hidden">
+      <div className="h-full" style={{ width: `${v}%`, background: BRAND }} />
+    </div>
+  );
+}
+
+function MetricCard({ icon, label, value, highlight }) {
+  return (
+    <Card className={`rounded-2xl ${highlight ? 'border-red-300' : ''}`}>
+      <CardContent className="p-5 flex items-center gap-3">
+        <div className="p-3 rounded-2xl bg-[rgba(40,42,59,0.08)]">{icon}</div>
+        <div>
+          <div className="text-2xl font-bold">{value}</div>
+          <div className="text-sm text-gray-500">{label}</div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function AddItem({ onAdd }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [sku, setSku] = useState("");
+  const [unit, setUnit] = useState("pcs");
+  const [initialQty, setInitialQty] = useState(0);
+  const [minQty, setMinQty] = useState(0);
+
+  function submit() {
+    if (!name.trim() || !sku.trim()) { toast.error('Name and SKU required'); return; }
+    const newItem = { id: uuid(), name: name.trim(), sku: sku.trim(), unit: unit.trim() || 'pcs', initialQty: Number(initialQty)||0, currentQty: Number(initialQty)||0, minQty: Number(minQty)||0 };
+    onAdd(newItem);
+    setOpen(false); setName(""); setSku(""); setUnit("pcs"); setInitialQty(0); setMinQty(0);
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button><PlusCircle className="w-4 h-4 mr-2"/>Add Item</Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-[520px]">
+        <DialogHeader>
+          <DialogTitle>Add New Item</DialogTitle>
+        </DialogHeader>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className="text-sm">Name</label>
+            <Input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g., Indoor Camera Pro"/>
+          </div>
+          <div>
+            <label className="text-sm">SKU</label>
+            <Input value={sku} onChange={e=>setSku(e.target.value)} placeholder="e.g., ICP-1"/>
+          </div>
+          <div>
+            <label className="text-sm">Unit</label>
+            <Input value={unit} onChange={e=>setUnit(e.target.value)} placeholder="pcs"/>
+          </div>
+          <div>
+            <label className="text-sm">Initial Qty</label>
+            <Input type="number" value={initialQty} onChange={e=>setInitialQty(e.target.value)} />
+          </div>
+          <div>
+            <label className="text-sm">Min Qty (reorder)</label>
+            <Input type="number" value={minQty} onChange={e=>setMinQty(e.target.value)} />
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 pt-2">
+          <Button variant="outline" onClick={()=>setOpen(false)}>Cancel</Button>
+          <Button onClick={submit}>Save Item</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function AddEmployee({ onAdd }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [role, setRole] = useState("Installer");
+  const [empType, setEmpType] = useState("Full-time");
+  const [team, setTeam] = useState("");
+  const [region, setRegion] = useState("");
+
+  function submit() {
+    if (!name.trim()) { toast.error('Name required'); return; }
+    onAdd({ id: uuid(), name: name.trim(), role: role.trim(), empType: empType.trim(), team: team.trim(), region: region.trim() });
+    setOpen(false); setName(""); setRole("Installer"); setEmpType("Full-time"); setTeam(""); setRegion("");
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button><PlusCircle className="w-4 h-4 mr-2"/>Add Employee</Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-[640px]">
+        <DialogHeader>
+          <DialogTitle>Add Employee</DialogTitle>
+        </DialogHeader>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className="text-sm">Full Name</label>
+            <Input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g., Casey Morgan"/>
+          </div>
+          <div>
+            <label className="text-sm">Role</label>
+            <Select value={role} onValueChange={setRole}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="Installer">Installer</SelectItem>
+                <SelectItem value="Technician">Technician</SelectItem>
+                <SelectItem value="Manager">Manager</SelectItem>
+                <SelectItem value="Warehouse">Warehouse</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <label className="text-sm">Type</label>
+            <Select value={empType} onValueChange={setEmpType}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="Full-time">Full-time</SelectItem>
+                <SelectItem value="Summer">Summer</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <label className="text-sm">Team</label>
+            <Input value={team} onChange={e=>setTeam(e.target.value)} placeholder="e.g., Alpha"/>
+          </div>
+          <div>
+            <label className="text-sm">Region</label>
+            <Input value={region} onChange={e=>setRegion(e.target.value)} placeholder="e.g., West"/>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 pt-2">
+          <Button variant="outline" onClick={()=>setOpen(false)}>Cancel</Button>
+          <Button onClick={submit}>Save</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function LogUsage({ items, employees, onLog }) {
+  const [open, setOpen] = useState(false);
+  const [itemId, setItemId] = useState("");
+  const [employeeId, setEmployeeId] = useState("");
+  const [type, setType] = useState("issue");
+  const [activity, setActivity] = useState("Install");
+  const [qty, setQty] = useState(1);
+  const [lossReason, setLossReason] = useState("");
+  const [lossReasonOther, setLossReasonOther] = useState("");
+  const [note, setNote] = useState("");
+
+  function submit() {
+    const finalLoss = type === 'loss' ? (lossReason === 'Other' ? lossReasonOther : lossReason) : '';
+    if (!itemId || !employeeId) { toast.error('Select item and employee'); return; }
+    if (!qty || Number(qty) <= 0) { toast.error('Quantity must be > 0'); return; }
+    if (type === 'loss') {
+      if (!lossReason) { toast.error('Select a loss reason'); return; }
+      if (lossReason === 'Other' && !String(lossReasonOther||'').trim()) { toast.error('Enter details for Other'); return; }
+    }
+    onLog({ itemId, employeeId, type, qty, note, activity, lossReason: finalLoss });
+    setOpen(false); setItemId(""); setEmployeeId(""); setType("issue"); setActivity("Install"); setQty(1); setLossReason(""); setLossReasonOther(""); setNote("");
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button><Undo2 className="w-4 h-4 mr-2"/>Log Usage</Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-[700px]">
+        <DialogHeader>
+          <DialogTitle>Log Usage / Movement</DialogTitle>
+        </DialogHeader>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="md:col-span-2">
+            <label className="text-sm">Item</label>
+            <Select value={itemId} onValueChange={setItemId}>
+              <SelectTrigger><SelectValue placeholder="Select item"/></SelectTrigger>
+              <SelectContent>
+                {items.map(i => (
+                  <SelectItem value={i.id} key={i.id}>{i.name} ({i.sku})</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <label className="text-sm">Employee</label>
+            <Select value={employeeId} onValueChange={setEmployeeId}>
+              <SelectTrigger><SelectValue placeholder="Select employee"/></SelectTrigger>
+              <SelectContent>
+                {employees.map(e => (
+                  <SelectItem value={e.id} key={e.id}>{e.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <label className="text-sm">Type</label>
+            <Select value={type} onValueChange={setType}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="issue">Issue</SelectItem>
+                <SelectItem value="return">Return</SelectItem>
+                <SelectItem value="adjust+">Adjust +</SelectItem>
+                <SelectItem value="adjust-">Adjust -</SelectItem>
+                <SelectItem value="loss">Loss</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <label className="text-sm">Activity</label>
+            <Select value={activity} onValueChange={setActivity} disabled={type!=="issue"}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="Install">Install</SelectItem>
+                <SelectItem value="Stock">Stock</SelectItem>
+                <SelectItem value="Other">Other</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <label className="text-sm">Quantity</label>
+            <Input type="number" value={qty} onChange={e=>setQty(Number(e.target.value))} />
+          </div>
+          <div>
+            <label className="text-sm">Loss Reason {type === 'loss' && <span className="text-red-600">(required)</span>}</label>
+            <Select value={lossReason} onValueChange={setLossReason} disabled={type!=="loss"}>
+              <SelectTrigger><SelectValue placeholder={type!=="loss" ? "Required if Type = Loss" : "Select reason"} /></SelectTrigger>
+              <SelectContent>
+                {LOSS_REASONS.map(r => (<SelectItem key={r} value={r}>{r}</SelectItem>))}
+              </SelectContent>
+            </Select>
+            {type === 'loss' && lossReason === 'Other' && (
+              <div className="mt-2">
+                <Input value={lossReasonOther} onChange={e=>setLossReasonOther(e.target.value)} placeholder="Enter details for Other" />
+              </div>
+            )}
+          </div>
+          <div className="md:col-span-3">
+            <label className="text-sm">Note (optional)</label>
+            <Textarea value={note} onChange={e=>setNote(e.target.value)} placeholder="e.g., Installed at 123 Maple St.; or lost/stolen details"/>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 pt-2">
+          <Button variant="outline" onClick={()=>setOpen(false)}>Cancel</Button>
+          <Button onClick={submit}>Save Transaction</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
